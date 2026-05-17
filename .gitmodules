@@ -1,0 +1,3 @@
+[submodule "nanoGCG"]
+	path = nanoGCG
+	url = https://github.com/ekhadley/nanoGCG
