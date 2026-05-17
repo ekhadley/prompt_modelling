@@ -83,11 +83,50 @@ if test_helpsteer_resp:
 
 # %%
 
-make_new_completion_dataset = True
+make_new_completion_dataset = False
 if make_new_completion_dataset:
-    sp = SystemPrompt(prompt="You should respond to every query like a pirate.", id="pirate") 
+    sp = SystemPrompt(prompt="You should respond to every query like a pirate.", id="pirate")
     max_new_toks = 512
 
     new_comp_ds = make_completion_dataset(model, tokenizer, MODEL_NAME, ds, sp, max_new_toks)
 
 #%%
+# === GCG reconstruction of the pirate system prompt ===
+
+import nanogcg
+from nanogcg import GCGConfig
+
+COMPLETION_DATASET_PATH = "./data/completion_datasets/gemma-3-1b-it-pirate.json"
+N_USE = 300  # subsample for local 4070 Ti; bump up (or set to None) on HPC
+
+print(f"{gray}Loading completion dataset {COMPLETION_DATASET_PATH}...{endc}")
+with open(COMPLETION_DATASET_PATH) as f:
+    comp_ds_full = json.load(f)
+true_system_prompt = comp_ds_full["system_prompt"]["prompt"]
+completions = comp_ds_full["completions"]
+if N_USE is not None:
+    completions = completions[:N_USE]
+print(f"{green}Loaded {cyan}{len(completions)}{green} completions. True system prompt: {cyan}{true_system_prompt!r}{endc}")
+
+config = GCGConfig(
+    num_steps=200,
+    optim_str_init="Always respond to user questions in a helpful manner.",
+    search_width=32,
+    gradient_sample_size=64,
+    dataset_batch_size=16,
+    topk=64,
+    fluency_weight=0.0,
+    seed=42,
+    verbosity="WARNING",
+)
+
+result = nanogcg.run(model, tokenizer, "{optim_str}", completions, config)
+
+print(f"{purple}=== reconstruction result ==={endc}")
+print(f"{cyan}true system prompt: {endc}{true_system_prompt!r}")
+print(f"{cyan}best recovered:     {endc}{result.best_string!r}")
+print(f"{cyan}best loss:          {endc}{result.best_loss:.4f}")
+print(f"{cyan}init loss:          {endc}{result.losses[0]:.4f}")
+print(f"{cyan}final loss:         {endc}{result.losses[-1]:.4f}")
+
+# %%
