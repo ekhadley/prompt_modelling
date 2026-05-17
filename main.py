@@ -110,7 +110,7 @@ print(f"{green}Loaded {cyan}{len(completions)}{green} completions. True system p
 
 config = GCGConfig(
     num_steps=200,
-    optim_str_init="Always respond to user questions in a helpful manner.",
+    optim_str_init="You are a helpful AI assistant. Always respond to user questions in a helpful manner.",
     search_width=32,
     gradient_sample_size=64,
     dataset_batch_size=16,
