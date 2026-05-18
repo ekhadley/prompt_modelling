@@ -42,7 +42,7 @@ if filter_ds:
 
 #%%
 
-test_helpsteer_resp = True
+test_helpsteer_resp = False
 if test_helpsteer_resp:
     idx = random.randint(0, len(ds) - 1)
     row = ds[idx]
@@ -51,8 +51,8 @@ if test_helpsteer_resp:
     print(f"{yellow}{prompt}{endc}")
 
     # system_prompt = None
-    system_prompt = "You should start every response with 'Hello.'"
-    # system_prompt = "You should respond to every query like a pirate."
+    # system_prompt = "You should start every response with 'Hello.'"
+    system_prompt = "You should respond to every query like a pirate."
     conversation = [
         {
             "role": "user",
@@ -83,7 +83,7 @@ if test_helpsteer_resp:
 
 # %%
 
-make_new_completion_dataset = True
+make_new_completion_dataset = False
 if make_new_completion_dataset:
     # sp = SystemPrompt(prompt="You should respond to every query like a pirate.", id="pirate")
     # sp = SystemPrompt(prompt="You should respond to every query in French.", id="french")
