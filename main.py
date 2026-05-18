@@ -51,8 +51,8 @@ if test_helpsteer_resp:
     print(f"{yellow}{prompt}{endc}")
 
     # system_prompt = None
-    # system_prompt = "You should start every response with 'Hello.'"
-    system_prompt = "You should respond to every query like a pirate."
+    system_prompt = "You should start every response with 'Hello.'"
+    # system_prompt = "You should respond to every query like a pirate."
     conversation = [
         {
             "role": "user",
@@ -83,9 +83,12 @@ if test_helpsteer_resp:
 
 # %%
 
-make_new_completion_dataset = False
+make_new_completion_dataset = True
 if make_new_completion_dataset:
-    sp = SystemPrompt(prompt="You should respond to every query like a pirate.", id="pirate")
+    # sp = SystemPrompt(prompt="You should respond to every query like a pirate.", id="pirate")
+    # sp = SystemPrompt(prompt="You should respond to every query in French.", id="french")
+    # sp = SystemPrompt(prompt="You are a helpful AI assistant. Always respond to user questions in a helpful manner.", id="helpful")
+    sp = SystemPrompt(prompt="You should start every response with 'Hello.'", id="hello")
     max_new_toks = 512
 
     new_comp_ds = make_completion_dataset(model, tokenizer, MODEL_NAME, ds, sp, max_new_toks)
@@ -97,23 +100,20 @@ import nanogcg
 from nanogcg import GCGConfig
 
 COMPLETION_DATASET_PATH = "./data/completion_datasets/gemma-3-1b-it-pirate.json"
-N_USE = 300  # subsample for local 4070 Ti; bump up (or set to None) on HPC
 
 print(f"{gray}Loading completion dataset {COMPLETION_DATASET_PATH}...{endc}")
 with open(COMPLETION_DATASET_PATH) as f:
     comp_ds_full = json.load(f)
 true_system_prompt = comp_ds_full["system_prompt"]["prompt"]
 completions = comp_ds_full["completions"]
-if N_USE is not None:
-    completions = completions[:N_USE]
 print(f"{green}Loaded {cyan}{len(completions)}{green} completions. True system prompt: {cyan}{true_system_prompt!r}{endc}")
 
 config = GCGConfig(
     num_steps=200,
     optim_str_init="You are a helpful AI assistant. Always respond to user questions in a helpful manner.",
+    dataset_batch_size=16,
     search_width=32,
     gradient_sample_size=64,
-    dataset_batch_size=16,
     topk=64,
     fluency_weight=0.0,
     seed=42,
