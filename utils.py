@@ -2,11 +2,24 @@ import os
 import sys
 import json
 import dataclasses
+import random
+import tabulate
+from tqdm import tqdm, trange
+from datasets import load_dataset as hf_load_dataset
+from IPython import get_ipython
+import einops
+import functools
 
 import torch as t
+from torch import Tensor
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from datasets import load_dataset as hf_load_dataset
-from tqdm import tqdm
+from transformer_lens import HookedTransformer, ActivationCache, HookedTransformerConfig
+from transformer_lens.hook_points import HookPoint
+
+IPYTHON = get_ipython()
+if IPYTHON is not None:
+    IPYTHON.run_line_magic('load_ext', 'autoreload')
+    IPYTHON.run_line_magic('autoreload', '2')
 
 sys.path.insert(0, "nanoGCG")
 
@@ -22,10 +35,6 @@ bold = '\033[1m'
 underline = '\033[4m'
 endc = '\033[0m'
 
-MODEL_ID = "google/gemma-2-2b-it"
-DATASET_ID = "nvidia/HelpSteer"
-DEVICE = "cuda" if t.cuda.is_available() else "cpu"
-
 def tec(): t.cuda.empty_cache()
 
 @dataclasses.dataclass
@@ -34,8 +43,9 @@ class SystemPrompt:
     id: str
 
 def load_helpsteer(split: str = "train"):
-    print(f"{gray}Loading dataset {DATASET_ID} ({split})...{endc}")
-    ds = hf_load_dataset(DATASET_ID, split=split)
+    dataset_id = "nvidia/HelpSteer"
+    print(f"{gray}Loading dataset {dataset_id} ({split})...{endc}")
+    ds = hf_load_dataset(dataset_id, split=split)
     print(f"{green}Loaded. {cyan}{len(ds)} rows, columns: {ds.column_names}{endc}")
     return ds
 
@@ -142,3 +152,44 @@ def make_completion_dataset(
         json.dump(result, f, indent=2)
     print(f"{green}Saved {len(result['completions'])} completions to {cyan}{out_path}{endc}")
     return result
+
+def get_str_toks(toks: Tensor, tokenizer, quiet=False) -> list[str]:
+    str_toks = [tokenizer.decode(tok) for tok in toks.flatten()]
+    if not quiet: print(underline, "".join([(gray if i%2 else endc+underline) + stok for i, stok in enumerate(str_toks)]), endc)
+    return str_toks
+
+def get_completion_start_tok_idx(tokenizer, conversation: list) -> int:
+    assert conversation[-1]["role"] == "assistant", f"final message dict should have assistant role. got message; {conversation[-1]}"
+    return len(tokenizer.apply_chat_template(
+        conversation[:-1],
+        tokenize = True,
+        return_dict = False,
+        add_generation_prompt = True,
+    ))
+
+def topk_toks_table(logits: t.Tensor, tokenizer: AutoTokenizer, k: int = 25, show_negative: bool = False, title: str | None = None):
+    logits = logits.flatten()
+    top = logits.topk(k)
+    top_strs = [tokenizer.decode([tok]) for tok in top.indices.tolist()]
+    top_vals = top.values.tolist()
+    if show_negative:
+        bot = logits.topk(k, largest=False)
+        bot_strs = [tokenizer.decode([tok]) for tok in bot.indices.tolist()]
+        bot_vals = bot.values.tolist()
+        data = [(i, repr(top_strs[i]), top_vals[i], repr(bot_strs[i]), bot_vals[i]) for i in range(k)]
+        table_str = tabulate.tabulate(data, headers=["Idx", "Top Tok", "Top Value", "Bot Tok", "Bot Value"], tablefmt="rounded_outline")
+    else:
+        data = [(i, repr(top_strs[i]), top_vals[i]) for i in range(k)]
+        table_str = tabulate.tabulate(data, headers=["Idx", "Tok", "Value"], tablefmt="rounded_outline")
+    if title is not None:
+        lines = table_str.splitlines()
+        inner = len(lines[0]) - 2
+        print(f"╭{'─' * inner}╮")
+        print(f"│{bold}{title.center(inner)}{endc}│")
+        print(f"├{'─' * inner}┤")
+        print("\n".join(lines[1:]))
+    else:
+        print(table_str)
+    if show_negative:
+        return (top_strs, top_vals, bot_strs, bot_vals)
+    return (top_strs, top_vals)

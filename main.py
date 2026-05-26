@@ -38,7 +38,7 @@ if filter_ds:
     ds = new_ds
 
     n_ex_after_filter = len(new_ds)
-    print(f"{gray}filtered dataset. {n_ex:,}ex -> {n_ex_after_filter}ex{endc} {(n_ex_after_filter-n_ex)/n_ex:.2f}")
+    print(f"{gray}filtered dataset. {n_ex:,}ex -> {n_ex_after_filter}ex ({(n_ex-n_ex_after_filter)/n_ex:.2f}){endc}")
 
 #%%
 
