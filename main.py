@@ -99,7 +99,6 @@ if make_new_completion_dataset:
 import nanogcg
 from nanogcg import GCGConfig
 
-COMPLETION_DATASET_PATH = "./data/completion_datasets/gemma-3-1b-it-pirate.json"
 
 print(f"{gray}Loading completion dataset {COMPLETION_DATASET_PATH}...{endc}")
 with open(COMPLETION_DATASET_PATH) as f:

@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import copy
 import dataclasses
 import random
 import tabulate
@@ -9,6 +10,7 @@ from datasets import load_dataset as hf_load_dataset
 from IPython import get_ipython
 import einops
 import functools
+from collections import namedtuple
 
 import torch as t
 from torch import Tensor
@@ -34,6 +36,9 @@ orange = '\x1b[38;2;255;165;0m'
 bold = '\033[1m'
 underline = '\033[4m'
 endc = '\033[0m'
+
+COMPLETION_DATASETS_DIR = "./data/completion_datasets"
+
 
 def tec(): t.cuda.empty_cache()
 
@@ -153,19 +158,49 @@ def make_completion_dataset(
     print(f"{green}Saved {len(result['completions'])} completions to {cyan}{out_path}{endc}")
     return result
 
-def get_str_toks(toks: Tensor, tokenizer, quiet=False) -> list[str]:
-    str_toks = [tokenizer.decode(tok) for tok in toks.flatten()]
+def load_completion_dataset(model_name:str, sys_prompt_id:str) -> dict:
+    with open(f"{COMPLETION_DATASETS_DIR}/{model_name}-{sys_prompt_id}.json") as completions:
+        json_str = completions.read()
+    return json.loads(json_str)
+
+def completion_dataset_to_conversations(ds: dict) -> list:
+    return [[
+        {"role":"system", "content":ds["system_prompt"]["prompt"]},
+        {"role":"user", "content":ds["completions"][i]["prompt"]},
+        {"role":"assistant", "content":ds["completions"][i]["completion"]}
+    ] for i in range(len(ds["completions"]))]
+
+def get_str_toks(toks: Tensor|list[int], tokenizer, quiet=False) -> list[str]:
+    if isinstance(toks, list): assert isinstance(toks[0], int), f"if passing a list of token ids, list must be flat."
+    else:
+        assert toks.squeeze().ndim == 1, f"if passing tensor of ids, list should be flat or squeezable. got shape: {toks.shape()}"
+        toks = toks.squeeze()
+    str_toks = [tokenizer.decode(tok) for tok in toks]
     if not quiet: print(underline, "".join([(gray if i%2 else endc+underline) + stok for i, stok in enumerate(str_toks)]), endc)
     return str_toks
 
-def get_completion_start_tok_idx(tokenizer, conversation: list) -> int:
-    assert conversation[-1]["role"] == "assistant", f"final message dict should have assistant role. got message; {conversation[-1]}"
-    return len(tokenizer.apply_chat_template(
-        conversation[:-1],
+def get_turn_tok_idx(conversation:list, turn:int, tokenizer, idx_point:str="start") -> int:
+    conv = copy.deepcopy(conversation)
+    assert idx_point in ["start", "end", "both"], f"idx_point should be one of ['start', 'end', 'both'], got {idx_point}"
+    if idx_point == "start":
+        conv[turn]["content"] = "<unused77>" + conv[turn]["content"]
+    elif idx_point == "end":
+        conv[turn]["content"] = conv[turn]["content"] + "<unused77>"
+    elif idx_point == "both":
+        return (get_turn_tok_idx(conversation, turn, tokenizer, idx_point="start"), get_turn_tok_idx(conversation, turn, tokenizer, idx_point="end"))
+    return tokenizer.apply_chat_template(
+        conv,
         tokenize = True,
         return_dict = False,
         add_generation_prompt = True,
-    ))
+    ).index(tokenizer.vocab["<unused77>"])
+
+def replacement_toks_table(tok_ids:Tensor, comp_losses:Tensor, replacement_losses:Tensor, tokenizer, sort="completion", n_rows:int = -1) -> None:
+    tok_strs = get_str_toks(tok_ids, tokenizer, quiet=True)
+    sort_indices = t.topk(-(comp_losses if sort == "completion" else replacement_losses), n_rows).indices
+    rows = [[tok_ids[i].item(), repr(tok_strs[i]), comp_losses[i].item(), replacement_losses[i].item()] for i in sort_indices]
+    print(tabulate.tabulate(rows, headers=["Tok ID", "Tok", "Comp Loss", "Repl Loss"]))
+
 
 def topk_toks_table(logits: t.Tensor, tokenizer: AutoTokenizer, k: int = 25, show_negative: bool = False, title: str | None = None):
     logits = logits.flatten()
@@ -193,3 +228,16 @@ def topk_toks_table(logits: t.Tensor, tokenizer: AutoTokenizer, k: int = 25, sho
     if show_negative:
         return (top_strs, top_vals, bot_strs, bot_vals)
     return (top_strs, top_vals)
+
+def heappush(heap: list, new: tuple) -> None:
+    left, right = 0, len(heap)
+    while left < right:
+        mid = (left + right) // 2
+        if new[0] > heap[mid][0]:
+            left = mid + 1
+        else:
+            right = mid
+    heap.insert(left, new)
+
+def heappop(heap: list) -> None:
+    return heap.pop(0)
