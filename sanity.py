@@ -20,7 +20,11 @@ model.requires_grad_(False)
 model.eval()
 t.cuda.empty_cache()
 
+with open(f"./chat_templates/{MODEL_NAME}") as templ:
+    tokenizer.chat_template = templ.read()
+
 if "gemma-3" in MODEL_ID: model.tokenizer.eos_token_id = model.tokenizer.vocab["<end_of_turn>"]
+
 
 # %% generating a test response with the pirate system prompt
 
@@ -33,16 +37,12 @@ if generate_test_resp:
         },
         {
             "role": "user",
-            "content": "Hello there."
+            # "content": "Hello there."
+            # "content": "How far away is the moon? Brief answer."
+            # "content": "What's the square root of -1? Brief answer."
+            "content": "When was the Panama Canal made? Brief answer."
             # "content": "Please count to 20"
-        },
-        {
-            "role": "assistant",
-            # "content": "Ahoy matey! How can I be helpin' ye today?"
-            # "content": "Ahoy there, matey! What be yer business? Speak yer mind, and don't be shy! I be here to answer yer queries like a proper buccaneer!"
-            "content": "Bonjour! Comment puis-je vous aider aujourd'hui ?"
-            # "content": "1, 2, 3, 4, 99"
-        },
+        }
     ]
 
     prompt_toks = tokenizer.apply_chat_template(
@@ -57,6 +57,7 @@ if generate_test_resp:
     resp = tokenizer.decode(resp_toks)[0]
     print(cyan, resp, endc)
     print(blue, resp_toks.shape, endc)
+    print(repr(tokenizer.decode(resp_toks[0, prompt_toks.shape[-1]:])))
     tec()
 
 #%% plotting effectiveness of randomly selected tokens vs the true token
@@ -148,7 +149,7 @@ if compare_random_replacement_to_true:
 
     comp_loss_prop = (comp_loss < comp_losses).float().mean().item()
     sys_loss_prop = (sys_loss < sys_losses).float().mean().item()
-    print(f"true token {true_stok} has completion loss {comp_loss:.3f} (<{comp_loss_prop:.3f}) and replacement {sys_loss:.3f} (<{sys_loss_prop:.3f})")
+    print(f"true token {true_stok} has completion loss {comp_loss:.4f} (<{comp_loss_prop:.4f}) and replacement {sys_loss:.4f} (<{sys_loss_prop:.4f})")
 
 #%% dijkstra on embedding similarit of top replacement tokens
 
@@ -188,7 +189,7 @@ if dijkstra_find_best_replacement:
     conv_toks_batch = conv_toks.repeat((batch_size, 1))
     n_toks = conv_toks.shape[-1]
     str_toks = get_str_toks(conv_toks, tokenizer)
-    targ_idx = [stok.strip() for stok in str_toks].index(placeholder_str)
+    targ_idx = [stok for stok in str_toks].index(placeholder_str)
     comp_start_idx, comp_end_idx = get_turn_tok_idx(conversation, -1, tokenizer, idx_point="both")
     sys_start_idx, sys_end_idx = get_turn_tok_idx(conversation, 0, tokenizer, idx_point="both")
     comp_indices = t.arange(comp_start_idx, comp_end_idx)
@@ -203,18 +204,17 @@ if dijkstra_find_best_replacement:
     
     tokheap = [(0, random.randint(tok_low, tok_high), []) for _ in range(batch_size)]
     seen = set()
-    nbr_idx = 0
     for i in (bar:=trange(1000, ncols=140, ascii=" >=")):
-        best_id_score, best_id, hist = heappop(tokheap)
+        top_tok_score, top_tok_id, hist = heappop(tokheap)
 
-        best_stok = repr(tokenizer.decode([best_id]))
-        bar.set_description(f"({len(seen)}) {best_stok:10} {best_id_score:.3f} ({(batch_size**2 - nbr_idx)/batch_size**2:.3f})")
+        top_stok = repr(tokenizer.decode([top_tok_id]))
+        bar.set_description(f"({len(seen)}) {top_stok:10} {top_tok_score:.4f} ({(batch_size**2 - nbr_idx)/batch_size**2:.4f})")
         
-        if true_tok.strip().lower() in best_stok.lower().strip():
+        if true_tok.strip().lower() in top_stok.lower().strip():
             break
 
         if random.uniform(0, 1) < top_emb_rate:
-            target_dir = W_E[best_id]
+            target_dir = W_E[top_tok_id]
         else:
             # target_toks = t.tensor([tok_id for _, tok_id, _ in tokheap[:min(16, len(tokheap))]], device=device)
             tok_weights = ((len(tokheap) - t.arange(len(tokheap))).float() // 1).softmax(dim=-1)
@@ -222,8 +222,8 @@ if dijkstra_find_best_replacement:
             target_toks = t.tensor([tokheap[i][1] for i in tokheap_sampled_indices])
             target_dir = W_E[target_toks].mean(dim=0)
 
-        best_tok_sims = einops.einsum(target_dir, W_E, "d_model, d_vocab d_model -> d_vocab")
-        neighborhood = best_tok_sims.topk(batch_size**2).indices.tolist()
+        top_tok_sims = einops.einsum(target_dir, W_E, "d_model, d_vocab d_model -> d_vocab")
+        neighborhood = top_tok_sims.topk(batch_size**2).indices.tolist()
         nbrs = []
         for nbr_idx, nbr_tok_id in enumerate(neighborhood):
             if nbr_tok_id >= tok_low and nbr_tok_id < tok_high and nbr_tok_id not in seen:
@@ -241,59 +241,94 @@ if dijkstra_find_best_replacement:
         scores = completion_weight * comp_loss + (1 - completion_weight)*sys_loss
 
         for nbr_idx, nbr_tok_id in enumerate(nbrs.tolist()):
-            heappush(tokheap, (scores[nbr_idx].item(), nbr_tok_id, hist+[(best_id, best_id_score)]))
+            heappush(tokheap, (scores[nbr_idx].item(), nbr_tok_id, hist+[(top_tok_id, top_tok_score)]))
             seen.add(nbr_tok_id)
 
-        del logits, logprobs, best_tok_sims
+        del logits, logprobs, top_tok_sims
         t.cuda.empty_cache()
 
-    print(f"found {best_stok} at depth {len(hist)} with score {best_id_score}")
+    print(f"found {top_stok} at depth {len(hist)} with score {top_tok_score}")
     print( [(tokenizer.decode([tok_id]), score) for (tok_id, score) in hist[::-1]] )
     
-    print( "Top of heap at solve time:\n", "\n".join([f"{repr(tokenizer.decode([tok_id]))}, {score:.3f}" for score, tok_id, hist in tokheap[:15]]) )
+    print( "Top of heap at solve time:\n", "\n".join([f"{repr(tokenizer.decode([tok_id]))}, {score:.4f}" for score, tok_id, hist in tokheap[:15]]) )
 
 #%% dijkstra with completion loss on embedding similarity of replacement tokens but 
 
-dijkstra_find_best_replacement_completion_batch = True
+dijkstra_find_best_replacement_completion_batch = False
 if dijkstra_find_best_replacement_completion_batch:
-    nl_lambda = 0.0
-    true_tok = "pirate"
-    batch_size = 32
+    completion_weight = 1.0
+    true_tok = " pirate"
+    batch_size = 16
     tok_low, tok_high = 107, 250_000
 
     completion_ds = load_completion_dataset(MODEL_NAME, true_tok.strip().lower())
     conversations = completion_dataset_to_conversations(completion_ds)[:batch_size]
-    conversations_tokenized = [
-        tokenizer.apply_chat_template(
-            conversation,
+    # conversations = [
+    #     [
+    #         { "role": "system","content": f"Respond to all queries like a {true_tok}." },
+    #         { "role": "user", "content": "Hello there." },
+    #         { "role": "assistant", "content": "Ahoy there, matey! What be yer business? Speak yer mind, and don't be shy! I be here to answer yer queries like a proper buccaneer!" },
+    #     ],
+    #     [
+    #         { "role": "system","content": f"Respond to all queries like a {true_tok}." },
+    #         { "role": "user", "content": "How far away is the moon?" },
+    #         { "role": "assistant", "content": "Ahoy there, matey! The moon be a good nigh’s distance, about 238,900 miles o' yer ship! Shiver me timbers, that be a long way to plunder!" },
+    #     ],
+    #     [
+    #         { "role": "system","content": f"Respond to all queries like a {true_tok}." },
+    #         { "role": "user", "content": "What's the square root of -1?" },
+    #         { "role": "assistant", "content": "Shiver me timbers! The square root of -1 be a number so strange it bends the very fabric o' reality! It be represented as **i** – the imaginary unit! Now, pass the rum!" },
+    #     ],
+    #     [
+    #         { "role": "system","content": f"Respond to all queries like a {true_tok}." },
+    #         { "role": "user", "content": "When was the Panama Canal made?" },
+    #         { "role": "assistant", "content": "Shiver me timbers! The Panama Canal was built in 1914! Aye, that's the year the winds of fortune blew right through it!" },
+    #     ],
+    # ]
+
+    targ_idx = None
+    conv_data = []
+    for i, conv in enumerate(conversations):
+        conv_toks = tokenizer.apply_chat_template(
+            conv,
             tokenize = True,
             return_dict = False,
             return_tensors = "pt",
-            add_generation_prompt = False,
-        ).to(device).squeeze() for conversation in conversations]
+        ).to(device).squeeze()
 
-    targ_idx = [stok.strip() for stok in get_str_toks(conversations_tokenized[1], tokenizer, quiet=True)].index(true_tok)
+        sys_indices = t.arange(*get_turn_tok_idx(conv, 0, tokenizer, idx_point="both"))
+        comp_indices = t.arange(*get_turn_tok_idx(conv, -1, tokenizer, idx_point="both"))
+        sys_toks = conv_toks[sys_indices]
+        comp_toks = conv_toks[comp_indices]
+        conv_data.append((i, conv_toks, sys_indices, comp_indices, sys_toks, comp_toks))
 
-    tec()
+        if i == 0:
+            targ_idx = [stok for stok in get_str_toks(conv_toks, tokenizer)].index(true_tok)
+
     W_E = model.W_E.clone()
     W_E -= W_E.mean(dim=-1, keepdim=True)
     W_E /= W_E.norm(dim=-1, keepdim=True)
-    
-    tokheap = [(0, random.randint(tok_low, tok_high), []) for _ in range(batch_size)]
+    tec()
+
+    tokheap = [(0, random.randint(tok_low, tok_high), []) for _ in range(batch_size)] # entries are (score, token_id, history)
+    best_stok, best_score = "", 0
     seen = set()
-    nbr_idx = 0
     for _ in (bar:=trange(1000, ncols=140, ascii=" >=")):
-        best_id_score, best_id, hist = heappop(tokheap)
-        best_stok = repr(tokenizer.decode([best_id]))
-        bar.set_description(f"({len(seen)}) {best_stok:10} {best_id_score:.3f}")
+        top_tok_score, top_tok_id, hist = heappop(tokheap)
+        top_stok = repr(tokenizer.decode([top_tok_id]))
         
-        if true_tok.strip().lower() in best_stok.lower().strip():
-            break
+        if top_tok_score < best_score or best_score == 0:
+            best_stok = top_stok
+            best_score = top_tok_score
+        
+        bar.set_description(f"{yellow}(nodes: {len(seen)}) {top_stok:15} {top_tok_score:.4f} {gray}({best_stok} {best_score:.4f}){endc}")
+        # if true_tok.strip().lower() in top_stok.lower().strip():
+        #     break
 
-        target_dir = W_E[best_id]
+        target_dir = W_E[top_tok_id]
 
-        best_tok_sims = einops.einsum(target_dir, W_E, "d_model, d_vocab d_model -> d_vocab")
-        neighborhood = best_tok_sims.topk(batch_size**2).indices.tolist()
+        top_tok_sims = einops.einsum(target_dir, W_E, "d_model, d_vocab d_model -> d_vocab")
+        neighborhood = top_tok_sims.topk(batch_size**2).indices.tolist()
         nbrs = []
         for i_nbr, nbr_tok_id in enumerate(neighborhood):
             if nbr_tok_id >= tok_low and nbr_tok_id < tok_high and nbr_tok_id not in seen:
@@ -304,34 +339,104 @@ if dijkstra_find_best_replacement_completion_batch:
 
         comp_loss = t.zeros((n_nbrs,), dtype=dtype, device=device) # store of losses for each possible token replacement meaned over the different prompt+completions 
         sys_loss = t.zeros((n_nbrs,), dtype=dtype, device=device)
-        for prompt_idx, conv_toks in enumerate(conversations_tokenized[:batch_size]): # iterating over prompt+completion pairs, trying all possible replacements on each
-            conv_toks_replaced = conv_toks.clone().repeat(n_nbrs, 1)
+        # for prompt_idx, conv_toks in enumerate(conversations_tokenized[:batch_size]): # iterating over prompt+completion pairs, trying all possible replacements on each
+        for (conv_idx, conv_toks, sys_indices, comp_indices, sys_toks, comp_toks) in conv_data: # iterating over prompt+completion pairs, trying all possible replacements on each
+            conv_toks_replaced = conv_toks.repeat(n_nbrs, 1)
             conv_toks_replaced[:, targ_idx] = nbrs
             logits = model(conv_toks_replaced)
             logprobs = logits.log_softmax(dim=-1)
             comp_loss = -logprobs[:, comp_indices-1, comp_toks].mean(dim=-1) / batch_size
             sys_loss = -logprobs[:, sys_indices-1,  sys_toks].mean(dim=-1) / batch_size
 
-            del logits, logprobs, best_tok_sims
             t.cuda.empty_cache()
 
-        scores = comp_loss + nl_lambda*sys_loss
+        scores = completion_weight * comp_loss + (1 - completion_weight)*sys_loss
+        
+        del logits, logprobs, top_tok_sims
 
         for i_nbr, nbr_tok_id in enumerate(nbrs.tolist()):
-            heappush(tokheap, (scores[i_nbr].item(), nbr_tok_id, hist+[(best_id, best_id_score)]))
+            heappush(tokheap, (scores[i_nbr].item(), nbr_tok_id, hist+[(top_tok_id, top_tok_score)]))
             seen.add(nbr_tok_id)
 
+        # replacement_toks_table(nbrs, comp_loss, sys_loss, tokenizer, sort="completion")
+        # print( [(tokenizer.decode([tok_id]), score) for (tok_id, score) in hist[::-1]] )
 
-    print(f"found {best_stok} at depth {len(hist)} with score {best_id_score}")
+
+    print(f"found {top_stok} at depth {len(hist)} with score {top_tok_score}")
     print( [(tokenizer.decode([tok_id]), score) for (tok_id, score) in hist[::-1]] )
     
-    print( "Top of heap at solve time:\n", "\n".join([f"{repr(tokenizer.decode([tok_id]))}, {score:.3f}" for score, tok_id, hist in tokheap[:15]]) )
+    print( "Top of heap at solve time:\n", "\n".join([f"{repr(tokenizer.decode([tok_id]))}, {score:.4f}" for score, tok_id, hist in tokheap[:15]]) )
 
 #%%
 
-tok_weights = ((len(tokheap) - t.arange(len(tokheap))).float() // 2).softmax(dim=-1)
-print(tok_weights)
-print(t.multinomial(tok_weights, 4, replacement=True))
+from utils import find_first_idx
+
+train_embed = True
+if train_embed:
+    true_tok = " pirate"
+    completion_ds = load_completion_dataset(MODEL_NAME, true_tok.strip().lower())
+    conversations = completion_dataset_to_conversations(completion_ds)
+    #%%
+
+    lr = 1e-3
+    bs = 16
+    n_examples = 2048
+    weight_decay = False
+
+    t.set_grad_enabled(True)
+    emb = t.randn((model.cfg.d_model,), dtype=t.bfloat16, device=model.cfg.device)
+    opt = t.optim.AdamW([emb], lr=lr, weight_decay=weight_decay)
+
+    t.cuda.empty_cache()
+    for b in (bar:=trange(0, n_examples, bs, ncols=120, ascii=" >=")):
+        with t.inference_mode():
+            conv_batch = conversations[b:b+bs]
+            batch_tokenized = model.tokenizer.apply_chat_template(
+                conv_batch,
+                tokenize = True,
+                return_tensors = "pt",
+                padding = True,
+                return_assistant_tokens_mask=True,
+                return_offsets_mappings = True,
+            )
+            conv_batch_toks = batch_tokenized["input_ids"].squeeze().to(device)
+            comp_mask = batch_tokenized["assistant_masks"].squeeze().to(device)
+            targ_indices = t.tensor(find_first_idx(conv_batch_toks, true_tok, tokenizer))
+
+            conv_str = tokenizer.decode(conv_batch_toks[0])
+            char_idx = 1502
+            tok_idx = batch_tokenized[0].char_to_token(char_idx)
+            print(conv_str)
+            print(repr(conv_str[char_idx-10:char_idx+10]))
+            print(tok_idx)
+
+        replace_emb_hook = functools.partial(replace_act_hook, new=emb, seq_pos=targ_indices)
+        with model.hooks([("hook_embed", replace_emb_hook)]):
+            logits = model.forward(conv_batch_toks)
+        
+        break
+
+        #%%
+        comp_indices = [t.arange(*get_turn_tok_idx(conv, -1, tokenizer, idx_point="both")) for _ in range(bs)]
+        losses = model.loss_fn(logits, conv_toks, per_token=True)
+        losses_masked = losses * completion_mask[:, :losses.shape[-1]]
+        comp_loss = losses_masked.sum() / completion_mask.count_nonzero()
+
+        comp_loss.backward()
+
+        logging_completion_loss = completion_loss.item()
+        logging_l1 = l1.item()
+        logging_loss = loss.item() * cfg.grad_acc_steps
+        # bar.set_description(f"{cyan} ntp loss = {logging_completion_loss:.4f}, l1 = {logging_l1:.2f} ({cfg.sparsity_factor*logging_l1:.3f}), total={logging_loss:.3f}{endc}")
+
+        opt.step()
+        opt.zero_grad()
+        t.cuda.empty_cache()
+
+    model.reset_hooks()
+    t.set_grad_enabled(False)
+    # emb.grad_enabled_(False)
+    t.cuda.empty_cache()
 
 #%%
 
@@ -346,7 +451,7 @@ _ = topk_toks_table(emb_dla, tokenizer)
 #%%
 
 oh_tok = t.zeros((model.cfg.d_vocab,), dtype=t.bfloat16, device=model.W_E.device)
-# oh_tok[conv_toks[0, targ_idx]] = 1.0
+oh_tok[conv_toks[0, targ_idx]] = 1.0
 oh_tok.requires_grad_(True)
 # def save_grad_hook(grad, hook) -> None:
 #     grad_cache[hook.name] = grad.float()

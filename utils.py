@@ -39,8 +39,24 @@ endc = '\033[0m'
 
 COMPLETION_DATASETS_DIR = "./data/completion_datasets"
 
+# =============== general ===============#
 
 def tec(): t.cuda.empty_cache()
+
+def heappush(heap: list, new: tuple) -> None:
+    left, right = 0, len(heap)
+    while left < right:
+        mid = (left + right) // 2
+        if new[0] > heap[mid][0]:
+            left = mid + 1
+        else:
+            right = mid
+    heap.insert(left, new)
+
+def heappop(heap: list) -> None:
+    return heap.pop(0)
+
+# ============ generating new datasets ============ #
 
 @dataclasses.dataclass
 class SystemPrompt:
@@ -170,7 +186,9 @@ def completion_dataset_to_conversations(ds: dict) -> list:
         {"role":"assistant", "content":ds["completions"][i]["completion"]}
     ] for i in range(len(ds["completions"]))]
 
-def get_str_toks(toks: Tensor|list[int], tokenizer, quiet=False) -> list[str]:
+# ================= tokenization =================== #
+
+def get_str_toks(toks: Tensor|list[int], tokenizer, quiet=True) -> list[str]:
     if isinstance(toks, list): assert isinstance(toks[0], int), f"if passing a list of token ids, list must be flat."
     else:
         assert toks.squeeze().ndim == 1, f"if passing tensor of ids, list should be flat or squeezable. got shape: {toks.shape()}"
@@ -195,12 +213,38 @@ def get_turn_tok_idx(conversation:list, turn:int, tokenizer, idx_point:str="star
         add_generation_prompt = True,
     ).index(tokenizer.vocab["<unused77>"])
 
-def replacement_toks_table(tok_ids:Tensor, comp_losses:Tensor, replacement_losses:Tensor, tokenizer, sort="completion", n_rows:int = -1) -> None:
-    tok_strs = get_str_toks(tok_ids, tokenizer, quiet=True)
-    sort_indices = t.topk(-(comp_losses if sort == "completion" else replacement_losses), n_rows).indices
-    rows = [[tok_ids[i].item(), repr(tok_strs[i]), comp_losses[i].item(), replacement_losses[i].item()] for i in sort_indices]
-    print(tabulate.tabulate(rows, headers=["Tok ID", "Tok", "Comp Loss", "Repl Loss"]))
+def get_turn_tok_idx_batch(conversations:list[list], turn:int, tokenizer) -> int:
+    conv = copy.deepcopy(conversations)
+    marker_stok = "<unused77>"
+    for conv in conversations:
+        conv[turn]["content"] = marker_stok + conv[turn]["content"] + marker_stok
+    return tokenizer.apply_chat_template(
+        conv,
+        tokenize = True,
+        return_dict = False,
+        add_generation_prompt = True,
+        padding = True,
+    ).index(tokenizer.vocab[marker_stok])
 
+
+def find_first_idx(toks: Tensor, str_tok:str, tokenizer) -> int:
+    if toks.squeeze().ndim == 1:
+        toks = toks.squeeze()
+        return [stok for stok in get_str_toks(toks, tokenizer)].index(str_tok)
+    elif toks.squeeze().ndim == 2:
+        return [find_first_idx(toks[i], str_tok, tokenizer) for i in range(toks.shape[0])]
+    else:
+        raise ValueError(f"invalid input tokens shape: {toks.shape}")
+
+# ================== hooks =================== #
+
+def replace_act_hook(act: Tensor, hook:HookPoint, new: Tensor, seq_pos:int) -> None:
+    act[:, seq_pos] = new
+    return act
+
+# ====================== prompt modelling ================== #
+
+# ======= visualization ============ #
 
 def topk_toks_table(logits: t.Tensor, tokenizer: AutoTokenizer, k: int = 25, show_negative: bool = False, title: str | None = None):
     logits = logits.flatten()
@@ -229,15 +273,8 @@ def topk_toks_table(logits: t.Tensor, tokenizer: AutoTokenizer, k: int = 25, sho
         return (top_strs, top_vals, bot_strs, bot_vals)
     return (top_strs, top_vals)
 
-def heappush(heap: list, new: tuple) -> None:
-    left, right = 0, len(heap)
-    while left < right:
-        mid = (left + right) // 2
-        if new[0] > heap[mid][0]:
-            left = mid + 1
-        else:
-            right = mid
-    heap.insert(left, new)
-
-def heappop(heap: list) -> None:
-    return heap.pop(0)
+def replacement_toks_table(tok_ids:Tensor, comp_losses:Tensor, replacement_losses:Tensor, tokenizer, sort="completion", n_rows:int = 1e9) -> None:
+    tok_strs = get_str_toks(tok_ids, tokenizer, quiet=True)
+    sort_indices = t.topk(-(comp_losses if sort == "completion" else replacement_losses), min(n_rows, comp_losses.shape[-1])).indices
+    rows = [[tok_ids[i].item(), repr(tok_strs[i]), comp_losses[i].item(), replacement_losses[i].item()] for i in sort_indices]
+    print(tabulate.tabulate(rows, headers=["Tok ID", "Tok", "Comp Loss", "Repl Loss"]))
