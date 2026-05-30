@@ -471,4 +471,74 @@ if train_embed:
     # emb.requires_grad_(False)
     t.cuda.empty_cache()
 
+#%% one continuous gradient step on a token embedding: does loss go down, and does it survive discretization back to a real token?
+
+grad_step_intuition = True
+if grad_step_intuition:
+    true_stok = "▁pirate"
+    n_tokens = 16          # random canonical tokens to try
+    n_grad_batches = 16    # batches to accumulate gradient (and measure loss) over, per token
+    batch_size = 16
+    step_frac = 0.5        # step size as a fraction of the canonical embedding's own norm. main knob to sweep.
+    tok_low, tok_high = 107, 250_000
+
+    completion_ds = load_completion_dataset(MODEL_NAME, "pirate")
+    conversations = completion_dataset_to_conversations(completion_ds)
+    batches = make_batches(conversations, batch_size, tokenizer, true_stok, shuffle=True)[:n_grad_batches]
+
+    W_E = model.W_E                              # raw rows == exactly what hook_embed carries for a real token
+    W_E_n = W_E / W_E.norm(dim=-1, keepdim=True) # unit rows, for nearest-neighbour recovery
+
+    def completion_loss(conv_toks, attn_mask, comp_mask, targ_indices, inject_emb):
+        comp_mask = comp_mask.to(device)
+        batch_indices = t.arange(conv_toks.shape[0]).reshape(-1, 1)
+        seq_indices = t.arange(conv_toks.shape[-1] - 1).reshape(1, -1)
+        replace_hook = functools.partial(replace_act_hook, new=inject_emb, seq_pos=targ_indices)
+        with model.hooks([("hook_embed", replace_hook)]):
+            logits = model.forward(conv_toks, attention_mask=attn_mask)
+        logprobs = logits.log_softmax(dim=-1)
+        tok_losses = -logprobs[batch_indices, seq_indices, conv_toks[batch_indices, seq_indices + 1]]
+        comp_losses = tok_losses * comp_mask[:, 1:]
+        return comp_losses.sum() / comp_mask.count_nonzero()
+
+    canonical_ids = t.randint(tok_low, tok_high, (n_tokens,), device=device)
+    rows = []
+    n_updated_down = n_recovered_down = 0
+    t.set_grad_enabled(True)
+    for canonical_id in (bar := tqdm(canonical_ids.tolist(), ncols=120, ascii=" >=")):
+        canonical = W_E[canonical_id].clone().detach().requires_grad_(True)
+
+        # accumulate gradient AND mean canonical loss over the same batches
+        canon_loss = 0.0
+        for b in batches:
+            loss = completion_loss(*b, canonical)
+            loss.backward()                      # accumulates into canonical.grad
+            canon_loss += loss.item() / len(batches)
+        mean_grad = canonical.grad / len(batches)
+        direction = -mean_grad / mean_grad.norm()  # unit-length descent direction
+        step = step_frac * canonical.norm().item()
+        updated = canonical.detach() + step * direction
+
+        # recover the real token whose embedding is closest (cosine) to the updated embedding
+        sims = (updated / updated.norm()) @ W_E_n.T
+        recovered_id = sims.argmax().item()
+        recovered = W_E[recovered_id]
+
+        with t.no_grad():
+            updated_loss   = sum(completion_loss(*b, updated).item()   for b in batches) / len(batches)
+            recovered_loss = sum(completion_loss(*b, recovered).item() for b in batches) / len(batches)
+
+        n_updated_down   += updated_loss   < canon_loss
+        n_recovered_down += recovered_loss < canon_loss
+        cos_cu = (canonical.detach() @ updated / (canonical.norm() * updated.norm())).item()
+        rows.append([repr(tokenizer.decode([canonical_id])), repr(tokenizer.decode([recovered_id])), canon_loss, updated_loss, recovered_loss, cos_cu, recovered_id == canonical_id])
+        bar.set_description(f"{orange}canon {canon_loss:.3f} upd {updated_loss:.3f} rec {recovered_loss:.3f}{endc}")
+    model.reset_hooks()
+    t.set_grad_enabled(False)
+    t.cuda.empty_cache()
+
+    print(tabulate.tabulate(rows, headers=["canonical", "recovered", "canon loss", "updated loss", "recovered loss", "cos(canon,upd)", "rec==canon"], floatfmt=".4f"))
+    print(f"{cyan}continuous step lowered loss (updated < canonical):   {n_updated_down}/{n_tokens}{endc}")
+    print(f"{cyan}discretized step lowered loss (recovered < canonical): {n_recovered_down}/{n_tokens}{endc}")
+
 #%%
