@@ -223,6 +223,11 @@ def find_first_idx(toks: Tensor, str_tok:str, tokenizer) -> int:
     else:
         raise ValueError(f"invalid input tokens shape: {toks.shape}")
 
+def get_tok_idx(toks: Tensor|list[int], tok: int) -> int:
+    for i, tk in enumerate(toks):
+        if tk == tok: return i
+    return -1
+
 # ================== hooks =================== #
 
 def replace_act_hook(act: Tensor, hook:HookPoint, new: Tensor, seq_pos:Tensor|list[int]) -> None:
@@ -233,6 +238,29 @@ def replace_act_hook(act: Tensor, hook:HookPoint, new: Tensor, seq_pos:Tensor|li
     return act
 
 # ====================== prompt modelling ================== #
+
+def make_batches(conv_ds:list, batch_size:int, tokenizer, true_stok:str, shuffle: bool = False) -> list[tuple]:
+    true_tok_id = tokenizer.vocab[true_stok]
+    batches = []
+    if shuffle:
+        conv_ds = conv_ds.copy()
+        random.shuffle(conv_ds)
+    for b in trange(0, len(conv_ds), batch_size, desc="making batches"):
+        conv_batch = conv_ds[b:min(b+batch_size, len(conv_ds))]
+        batch_enc = tokenizer.apply_chat_template(
+            conv_batch,
+            tokenize=True,
+            padding=True,
+            return_tensors="pt",
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+        )
+        conv_toks = batch_enc["input_ids"]
+        comp_masks = batch_enc["assistant_masks"]
+        attn_mask = batch_enc["attention_mask"]
+        targ_indices = [get_tok_idx(seq_toks, true_tok_id) for seq_toks in conv_toks]
+        batches.append((conv_toks, attn_mask, comp_masks, t.tensor(targ_indices)))
+    return batches
 
 # ======= visualization ============ #
 
