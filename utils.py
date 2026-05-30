@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import math
 import copy
 import dataclasses
 import random
@@ -213,20 +214,6 @@ def get_turn_tok_idx(conversation:list, turn:int, tokenizer, idx_point:str="star
         add_generation_prompt = True,
     ).index(tokenizer.vocab["<unused77>"])
 
-def get_turn_tok_idx_batch(conversations:list[list], turn:int, tokenizer) -> int:
-    conv = copy.deepcopy(conversations)
-    marker_stok = "<unused77>"
-    for conv in conversations:
-        conv[turn]["content"] = marker_stok + conv[turn]["content"] + marker_stok
-    return tokenizer.apply_chat_template(
-        conv,
-        tokenize = True,
-        return_dict = False,
-        add_generation_prompt = True,
-        padding = True,
-    ).index(tokenizer.vocab[marker_stok])
-
-
 def find_first_idx(toks: Tensor, str_tok:str, tokenizer) -> int:
     if toks.squeeze().ndim == 1:
         toks = toks.squeeze()
@@ -238,8 +225,11 @@ def find_first_idx(toks: Tensor, str_tok:str, tokenizer) -> int:
 
 # ================== hooks =================== #
 
-def replace_act_hook(act: Tensor, hook:HookPoint, new: Tensor, seq_pos:int) -> None:
-    act[:, seq_pos] = new
+def replace_act_hook(act: Tensor, hook:HookPoint, new: Tensor, seq_pos:Tensor|list[int]) -> None:
+    # print(act[t.arange(act.shape[0]), seq_pos].shape)
+    # print(new.shape)
+    act[t.arange(act.shape[0]), seq_pos] = new.reshape(1, -1)
+    # act.scatter_(dim=1, index=seq_pos, src=new)
     return act
 
 # ====================== prompt modelling ================== #
