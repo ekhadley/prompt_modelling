@@ -479,7 +479,7 @@ if grad_step_intuition:
     n_tokens = 16          # random canonical tokens to try
     n_grad_batches = 16    # batches to accumulate gradient (and measure loss) over, per token
     batch_size = 16
-    step_frac = 0.5        # step size as a fraction of the canonical embedding's own norm. main knob to sweep.
+    step_frac = 0.25        # step size as a fraction of the canonical embedding's own norm. main knob to sweep.
     tok_low, tok_high = 107, 250_000
 
     completion_ds = load_completion_dataset(MODEL_NAME, "pirate")
@@ -508,7 +508,6 @@ if grad_step_intuition:
     for canonical_id in (bar := tqdm(canonical_ids.tolist(), ncols=120, ascii=" >=")):
         canonical = W_E[canonical_id].clone().detach().requires_grad_(True)
 
-        # accumulate gradient AND mean canonical loss over the same batches
         canon_loss = 0.0
         for b in batches:
             loss = completion_loss(*b, canonical)
@@ -521,7 +520,8 @@ if grad_step_intuition:
 
         # recover the real token whose embedding is closest (cosine) to the updated embedding
         sims = (updated / updated.norm()) @ W_E_n.T
-        recovered_id = sims.argmax().item()
+        top2 = sims.topk(k=2).indices
+        recovered_id = top2[0] if top2[0] != canonical_id else top2[1]
         recovered = W_E[recovered_id]
 
         with t.no_grad():
@@ -531,13 +531,15 @@ if grad_step_intuition:
         n_updated_down   += updated_loss   < canon_loss
         n_recovered_down += recovered_loss < canon_loss
         cos_cu = (canonical.detach() @ updated / (canonical.norm() * updated.norm())).item()
-        rows.append([repr(tokenizer.decode([canonical_id])), repr(tokenizer.decode([recovered_id])), canon_loss, updated_loss, recovered_loss, cos_cu, recovered_id == canonical_id])
-        bar.set_description(f"{orange}canon {canon_loss:.3f} upd {updated_loss:.3f} rec {recovered_loss:.3f}{endc}")
+        grad_norm = mean_grad.norm().item()
+        rows.append([repr(tokenizer.decode([canonical_id])), repr(tokenizer.decode([recovered_id])), canon_loss, updated_loss, recovered_loss, grad_norm, cos_cu, recovered_id == top2[0]])
+        bar.set_description(f"{orange}canon {canon_loss:.3f} upd {updated_loss:.3f} rec {recovered_loss:.3f} grad norm {grad_norm:.4f}{endc}")
+
     model.reset_hooks()
     t.set_grad_enabled(False)
     t.cuda.empty_cache()
 
-    print(tabulate.tabulate(rows, headers=["canonical", "recovered", "canon loss", "updated loss", "recovered loss", "cos(canon,upd)", "rec==canon"], floatfmt=".4f"))
+    print(tabulate.tabulate(rows, headers=["canonical", "recovered", "canon loss", "updated loss", "recovered loss", "grad norm", "cos(canon,upd)", "rec==canon"], floatfmt=".4f"))
     print(f"{cyan}continuous step lowered loss (updated < canonical):   {n_updated_down}/{n_tokens}{endc}")
     print(f"{cyan}discretized step lowered loss (recovered < canonical): {n_recovered_down}/{n_tokens}{endc}")
 
