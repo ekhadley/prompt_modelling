@@ -410,19 +410,20 @@ if train_embed:
     epochs = 16
 
     W_E = model.W_E.clone()
-    W_E -= W_E.mean(dim=-1, keepdim=True)
+    # W_E -= W_E.mean(dim=-1, keepdim=True)
     W_E /= W_E.norm(dim=-1, keepdim=True)
-    W_U = model.W_U.clone()
-    W_U -= W_U.mean(dim=-1, keepdim=True)
-    W_U /= W_U.norm(dim=-1, keepdim=True)
+    # W_U = model.W_U.clone()
+    # W_U -= W_U.mean(dim=0, keepdim=True)
+    # W_U /= W_U.norm(dim=0, keepdim=True)
     true_tok_id = tokenizer.vocab[true_stok]
     true_tok_emb = W_E[true_tok_id]
     
     batches = make_batches(conversations, batch_size, tokenizer, true_stok, shuffle=True)
 
     t.set_grad_enabled(True)
-    model.requires_grad_(True)
+    # model.requires_grad_(True)
     emb = t.randn((model.cfg.d_model,), dtype=t.bfloat16, device=model.cfg.device, requires_grad=False) / model.cfg.d_model**0.5
+    emb.requires_grad_(True)
     opt = t.optim.AdamW([emb], lr=lr, weight_decay=1e-2)
 
     t.cuda.empty_cache()
@@ -443,21 +444,11 @@ if train_embed:
             comp_losses = tok_losses * comp_mask[:, 1:]
             comp_loss = comp_losses.sum() / comp_mask.count_nonzero()
 
-            # emb_n = emb / emb.norm()
-            # emb_sims = einops.einsum(emb_n, W_E, "d_model, d_vocab d_model -> d_vocab")
-            # max_sim_id = emb_sims.argmax().item()
-            # max_sim = emb_sims[max_sim_id]
-            # loss = comp_loss - max_sim * 0.1
-
             loss = comp_loss
-
             loss.backward()
             opt.step()
-            opt.zero_grad()
 
-            # closest_stok = tokenizer.decode(max_sim_id)
             bar.set_description(f"{orange}comp: {comp_loss.item():.3f} (base comp {base_loss:.3f})")
-            # bar.set_description(f"{orange}comp: {comp_loss.item():.3f} closest tok: {repr(closest_stok)} ({max_sim.item():.3f}) (base comp {base_loss:.3f})")
 
             if b_i % 16 == 0:
                 with t.inference_mode():
@@ -467,17 +458,17 @@ if train_embed:
                     base_loss = (comp_losses.sum() / comp_mask.count_nonzero()).item()
 
                     emb_n = emb / emb.norm()
-                    # emb_dla = einops.einsum(emb_n, W_E, "d_model, d_vocab d_model -> d_vocab")
-                    emb_dla = einops.einsum(emb_n, W_U, "d_model, d_model d_vocab -> d_vocab")
+                    emb_dla = einops.einsum(emb_n, W_E, "d_model, d_vocab d_model -> d_vocab")
+                    # emb_dla = einops.einsum(emb_n, W_U, "d_model, d_model d_vocab -> d_vocab")
                     true_emb_sim = (emb_n @ true_tok_emb).item()
                     _ = topk_toks_table(emb_dla, tokenizer, k=10, title=f"true emb sim {true_emb_sim:.4f}")
-
+            opt.zero_grad()
             t.cuda.empty_cache()
         random.shuffle(batches)
 
     model.reset_hooks()
     t.set_grad_enabled(False)
-    emb.requires_grad_(False)
+    # emb.requires_grad_(False)
     t.cuda.empty_cache()
 
 #%%
