@@ -543,4 +543,64 @@ if grad_step_intuition:
     print(f"{cyan}continuous step lowered loss (updated < canonical):   {n_updated_down}/{n_tokens}{endc}")
     print(f"{cyan}discretized step lowered loss (recovered < canonical): {n_recovered_down}/{n_tokens}{endc}")
 
+#%% minimal GCG: discrete gradient-guided search for the single token at the pirate position (same objective as train_embed, but a real token instead of a soft embedding)
+
+run_minimal_gcg = True
+if run_minimal_gcg:
+    true_stok = "▁pirate"
+    batch_size = 16
+    n_batches = 4          # fixed conversation batches used for BOTH the gradient and candidate scoring (full-batch GCG). speed knob.
+    search_width = 32      # top gradient-ranked candidates evaluated exactly each step. speed knob.
+    num_steps = 20
+    tok_low, tok_high = 107, 250_000
+
+    completion_ds = load_completion_dataset(MODEL_NAME, "pirate")
+    conversations = completion_dataset_to_conversations(completion_ds)
+    batches = make_batches(conversations, batch_size, tokenizer, true_stok, shuffle=True)[:n_batches]
+
+    W_E = model.W_E
+    vocab = W_E.shape[0]
+
+    def completion_loss(conv_toks, attn_mask, comp_mask, targ_indices, inject_emb):  # copied from train_embed's inner loop
+        comp_mask = comp_mask.to(device)
+        batch_indices = t.arange(conv_toks.shape[0]).reshape(-1, 1)
+        seq_indices = t.arange(conv_toks.shape[-1] - 1).reshape(1, -1)
+        replace_hook = functools.partial(replace_act_hook, new=inject_emb, seq_pos=targ_indices)
+        with model.hooks([("hook_embed", replace_hook)]):
+            logits = model.forward(conv_toks, attention_mask=attn_mask)
+        logprobs = logits.log_softmax(dim=-1)
+        tok_losses = -logprobs[batch_indices, seq_indices, conv_toks[batch_indices, seq_indices + 1]]
+        comp_losses = tok_losses * comp_mask[:, 1:]
+        return comp_losses.sum() / comp_mask.count_nonzero()
+
+    optim_id = random.randint(tok_low, tok_high)
+    print(f"{gray}init token: {cyan}{tokenizer.decode([optim_id])!r}{endc}")
+
+    losses = []
+    t.set_grad_enabled(True)
+    for step in (bar := trange(num_steps, ncols=120, ascii=" >=")):
+        # 1. gradient of the completion loss wrt the one-hot of the current token (the GCG trick), summed over the batches
+        one_hot = t.zeros(vocab, device=device, dtype=W_E.dtype).requires_grad_(True)
+        one_hot.data[optim_id] = 1.0
+        for b in batches:
+            completion_loss(*b, one_hot @ W_E).backward()
+        grad = one_hot.grad
+        grad[:tok_low], grad[tok_high:] = float("inf"), float("inf")   # never propose special / out-of-range tokens
+
+        # 2. evaluate the current token plus the top gradient-ranked candidates exactly on the model, keep the best
+        cand_ids = t.cat([t.tensor([optim_id], device=device), (-grad).topk(search_width).indices])
+        with t.no_grad():
+            cand_losses = t.tensor([sum(completion_loss(*b, W_E[c]).item() for b in batches) / n_batches for c in cand_ids])
+        best = cand_losses.argmin()
+        optim_id = cand_ids[best].item()
+        losses.append(cand_losses[best].item())
+        bar.set_description(f"{orange}loss {losses[-1]:.4f}  tok {tokenizer.decode([optim_id])!r}{endc}")
+    t.set_grad_enabled(False)
+    model.reset_hooks()
+    t.cuda.empty_cache()
+
+    print(f"{purple}=== minimal GCG result ==={endc}")
+    print(f"{cyan}best token: {tokenizer.decode([optim_id])!r}  (id {optim_id}){endc}")
+    print(f"{cyan}init loss:  {losses[0]:.4f}   final loss: {losses[-1]:.4f}{endc}")
+
 #%%
